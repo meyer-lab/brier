@@ -1,0 +1,15 @@
+[project]
+name = "brier"
+version = "0.1.0"
+description = "Package for analyzing models using strictly proper scoring rules"
+authors = [
+    { name = "Ethan Hurt", email = "eshurt@g.ucla.edu" },
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.4.3",
+    "polars>=1.39.3",
+    "pytest>=9.0.2",
+    "scikit-learn>=1.8.0",
+]
