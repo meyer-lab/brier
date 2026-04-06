@@ -122,7 +122,7 @@ c_values = (
     )
 )
 
-print(f"\nSelected C across replicates:")
+print("\nSelected C across replicates:")
 print(f"  mean:   {c_values['C'].mean():.4f}")
 print(f"  median: {c_values['C'].median():.4f}")
 print(f"  std:    {c_values['C'].std():.4f}")

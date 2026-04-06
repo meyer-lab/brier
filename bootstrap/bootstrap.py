@@ -54,6 +54,7 @@ def wrap_model(
         f"fit(X, y) -> fitted, predict_proba(fitted, X) -> np.ndarray of shape (n_samples, 2)"
     )
 
+
 def generate_replicates(
         n_samples: int,
         n_replicates: int,
@@ -63,7 +64,7 @@ def generate_replicates(
 
     Parameters:
     n_samples: int
-        Total number of samples in the dataset (patients typically).
+        Total number of samples in the dataset.
     n_replicates: int
         Number of bootstrap replicates.
     random_seed: int
@@ -119,7 +120,7 @@ def run_replicate(
     seed: int
         Root random seed (recorded in metadata, used for RNG in orchestrator).
     collect_inbag : bool
-        If True, also predict on unique in-bag patients.
+        If True, also predict on unique in-bag samples.
 
     Returns:
     ReplicateResult
@@ -204,7 +205,7 @@ def run_replicate(
     # Validate on first success
     model.validate_proba(oob_probs, n_samples=len(indices.oob))
 
-    # Predict in-bag (optional, on unique patients only)
+    # Predict in-bag (optional, on unique samples only)
     inbag_probs: np.ndarray | None = None
     if collect_inbag:
         try:
