@@ -65,3 +65,20 @@ class ModelWrapper:
                 f"replicates {bad_idx[:5]} have sums {row_sums[bad_idx[:5]]}"
             )
         self._validated = True
+
+@dataclass
+class AttrSpec:
+    """Specification for a user-defined attribute extractor. Model-specific."""
+    fn: Callable[[Any], Any]
+    critical: bool = False
+    ragged: bool = False
+
+@dataclass
+class TelemetrySpec:
+    """Specification for a user-defined telemetry extractor. Model- and Sample- specific."""
+    fn: Callable[[Any, Any, np.ndarray], np.ndarray]
+    critical: bool = False
+    ragged: bool = False
+
+class CriticalExtractorError(Exception):
+    pass

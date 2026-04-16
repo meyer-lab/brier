@@ -1,14 +1,16 @@
 from __future__ import annotations
-
+ 
 import json
+import sys
 import time
+import traceback
 from typing import TYPE_CHECKING, Any
-
+ 
 import numpy as np
-
-from .schemas import ReplicateResult, _make_failed_metadata
-from .types import BootstrapIndices, HparamResolver, ModelWrapper
-
+ 
+from .schemas import ReplicateResult
+from .types import AttrSpec, BootstrapIndices, CriticalExtractorError, HparamResolver, ModelWrapper, TelemetrySpec
+from .util import _flatten_dict, _make_failed_metadata, _classify_return
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -25,6 +27,7 @@ def wrap_model(
         - A tuple of (fit_fn, predict_proba_fn) callables with signatures:
             fit_fn(X, y) -> fitted_model
             predict_proba_fn(fitted_model, X) -> np.ndarray of shape (n_samples, 2)
+
     Parameters:
     model: Any
         The model or callable pair.
@@ -38,20 +41,33 @@ def wrap_model(
     """
     # If model is an sklearn-like estimator/object with fit/predict_proba
     if hasattr(model, "fit") and hasattr(model, "predict_proba"):
-        fit_fn: Callable[[Any, np.ndarray], Any] = lambda X, y: model.fit(X, y) or model
-        predict_proba_fn: Callable[[Any, np.ndarray], np.ndarray] = lambda fitted, X: fitted.predict_proba(X)
-        return ModelWrapper(label=label,fit_fn=fit_fn,predict_proba_fn=predict_proba_fn,hparam_resolver=hparam_resolver)
+        def fit_fn(X: Any, y: np.ndarray) -> Any:
+            return model.fit(X, y) or model
+        def predict_proba_fn(fitted: Any, X: np.ndarray) -> np.ndarray:
+            return fitted.predict_proba(X)
+        return ModelWrapper(
+            label=label,
+            fit_fn=fit_fn,
+            predict_proba_fn=predict_proba_fn,
+            hparam_resolver=hparam_resolver,
+        )
 
     # If user passes a tuple of (fit_fn, predict_proba_fn) instead of model
     if isinstance(model, tuple) and len(model) == 2:
         fit_fn, predict_proba_fn = model
         if callable(fit_fn) and callable(predict_proba_fn):
-            return ModelWrapper(label=label,fit_fn=fit_fn,predict_proba_fn=predict_proba_fn,hparam_resolver=hparam_resolver)
+            return ModelWrapper(
+                label=label,
+                fit_fn=fit_fn,
+                predict_proba_fn=predict_proba_fn,
+                hparam_resolver=hparam_resolver,
+            )
 
     raise TypeError(
-        f"Expected an object with .fit/.predict_proba methods or a tuple of equivalent callables"
-        f"got {type(model).__name__}. If passing callables, signature must be: "
-        f"fit(X, y) -> fitted, predict_proba(fitted, X) -> np.ndarray of shape (n_samples, 2)"
+        f"Expected an object with .fit/.predict_proba methods or a tuple of "
+        f"equivalent callables, got {type(model).__name__}. If passing callables, "
+        f"signature must be: fit(X, y) -> fitted, predict_proba(fitted, X) -> "
+        f"np.ndarray of shape (n_samples, 2)"
     )
 
 
@@ -105,12 +121,21 @@ def run_replicate(
     model: ModelWrapper,
     seed: int,
     collect_inbag: bool = False,
+    attribute_extractors: dict[str, AttrSpec] | None = None,
+    telemetry_extractors: dict[str, TelemetrySpec] | None = None,
 ) -> ReplicateResult:
-    """Execute one bootstrap replicate to resolve hparams (if applicable), fit, predict, collect.
+    """Execute one bootstrap replicate.
+
+    Execution order:
+        1. Resolve hparams (if user-specified)
+        2. Fit model
+        3. Extract attributes (if user-specified)
+        4. predict_proba on OOB (+ inbag if flagged)
+        5. Run telemetry extractors on OOB (+ in bag if flagged, user-specified)
  
     Parameters:
     X: Any
-        Full feature matrix/tensor. Expected to support indexing with integer arrays so may need to convert prior (e.g., np.asarray(X)).
+        Full feature matrix/tensor. 
     y: np.ndarray
         Full label vector.
     indices: BootstrapIndices
@@ -121,12 +146,17 @@ def run_replicate(
         Root random seed (recorded in metadata, used for RNG in orchestrator).
     collect_inbag : bool
         If True, also predict on unique in-bag samples.
+    attribute_extractors : dict[str, AttrSpec] or None
+        User-defined attribute extractors.
+    telemetry_extractors : dict[str, TelemetrySpec] or None
+        User-defined telemetry extractors.
 
     Returns:
     ReplicateResult
-        Metadata dict and list of probability row-dicts.
     """
     k = indices.replicate_idx
+    attribute_extractors = attribute_extractors or {}
+    telemetry_extractors = telemetry_extractors or {}
 
     # In case of empty OOB set
     if len(indices.oob) == 0:
@@ -135,21 +165,20 @@ def run_replicate(
             status="skipped_empty_oob",
             error_msg="OOB set is empty for this replicate",
         )
-        return ReplicateResult(metadata=meta, probabilities=[])
+        return ReplicateResult(metadata=meta, output_rows=[], attributes={}, telemetry={})
 
     # Slice data to obtain in-bag and OOB sets for this replicate
     unique_inbag = np.unique(indices.inbag)
     X_inbag, y_inbag = X[indices.inbag], y[indices.inbag]
     X_oob, y_oob = X[indices.oob], y[indices.oob]
-
+ 
     cv_duration_s: float | None = None
     fit_duration_s: float | None = None
     hparams_dict: dict | None = None
+    all_warnings: list[str] = []
 
-    # Optional hyperparameter tuning step via model's hparam_resolver.
-    # This is expected to be a user-defined function that takes in the in-bag data.
-    # Returns a new model instance with resolved hyperparameters, along with a dict of those hyperparameters for metadata recording.
-    # Example shown in analysis/example_usage.py.
+
+    # 1. Resolve hparams
     if model.hparam_resolver is not None:
         try:
             t0 = time.perf_counter()
@@ -162,13 +191,13 @@ def run_replicate(
                 error_msg=f"hparam_resolver raised {type(exc).__name__}: {exc}",
                 cv_duration_s=time.perf_counter() - t0,
             )
-            return ReplicateResult(metadata=meta, probabilities=[])
+            return ReplicateResult(metadata=meta, output_rows=[], attributes={}, telemetry={})
  
-        # If resolver returned a new model, re-wrap fit/predict to use it
-        # The resolver is expected to return a ready-to-fit object
         if resolved_model is not None and hasattr(resolved_model, "fit"):
-            fit_fn = lambda Xt, yt, m=resolved_model: m.fit(Xt, yt) or m
-            predict_fn = lambda fitted, Xt: fitted.predict_proba(Xt)
+            def fit_fn(Xt, yt, m=resolved_model):
+                return m.fit(Xt, yt) or m
+            def predict_fn(fitted, Xt):
+                return fitted.predict_proba(Xt)
         else:
             fit_fn = model.fit_fn
             predict_fn = model.predict_proba_fn
@@ -176,7 +205,8 @@ def run_replicate(
         fit_fn = model.fit_fn
         predict_fn = model.predict_proba_fn
 
-    # Fit model on in-bag data and predict on OOB data
+
+    # 2. Fit model 
     try:
         t0 = time.perf_counter()
         fitted_obj = fit_fn(X_inbag, y_inbag)
@@ -188,10 +218,46 @@ def run_replicate(
             error_msg=f"fit raised {type(exc).__name__}: {exc}",
             cv_duration_s=cv_duration_s,
         )
-        return ReplicateResult(metadata=meta, probabilities=[])
+        return ReplicateResult(metadata=meta, output_rows=[], attributes={}, telemetry={})
 
+
+    # 3. Extract attributes (includes hparams from resolver)
+    combined_attr_extractors = dict(attribute_extractors)
+    # Hparams synthetic extractor
+    if hparams_dict is not None:
+        combined_attr_extractors["hparams"] = AttrSpec(
+            fn=lambda _fitted, _hp=hparams_dict: _hp,
+            critical=False,
+            ragged=False,
+        )
+    extracted_attributes: dict[str, Any] = {}
+    if combined_attr_extractors:
+        try:
+            extracted_attributes, attr_warnings = _extract_attributes(
+                fitted_obj, combined_attr_extractors
+            )
+            all_warnings.extend(attr_warnings)
+        except CriticalExtractorError as exc:
+            meta = _make_failed_metadata(
+                indices, y, model, seed,
+                status="failed",
+                error_msg=str(exc),
+                cv_duration_s=cv_duration_s,
+                fit_duration_s=fit_duration_s,
+            )
+            print(
+                f"Replicate {k}: critical attribute extractor failed\n"
+                f"{traceback.format_exc()}",
+                file=sys.stderr, flush=True,
+            )
+            return ReplicateResult(
+                metadata=meta, output_rows=[], attributes={}, telemetry={},
+            )
+    
+
+    # 4. Predict on OOB (and in-bag if flagged)
     try:
-        oob_probs = predict_fn(fitted_obj, X_oob)  # (n_oob, 2)
+        oob_probs = predict_fn(fitted_obj, X_oob)
     except Exception as exc:
         meta = _make_failed_metadata(
             indices, y, model, seed,
@@ -200,19 +266,92 @@ def run_replicate(
             cv_duration_s=cv_duration_s,
             fit_duration_s=fit_duration_s,
         )
-        return ReplicateResult(metadata=meta, probabilities=[])
-
-    # Validate on first success
+        return ReplicateResult(
+            metadata=meta, output_rows=[], attributes=extracted_attributes, telemetry={},
+        )
     model.validate_proba(oob_probs, n_samples=len(indices.oob))
-
-    # Predict in-bag (optional, on unique samples only)
     inbag_probs: np.ndarray | None = None
     if collect_inbag:
         try:
-            inbag_probs = predict_fn(fitted_obj, X[unique_inbag])  # (n_unique_inbag, 2)
-        except Exception as exc:
+            inbag_probs = predict_fn(fitted_obj, X[unique_inbag])
+        except Exception:
             inbag_probs = None
 
+
+    # 5. Extract telemetry on OOB (and in-bag if flagged)
+    telemetry_results: dict[str, Any] = {}
+    if telemetry_extractors:
+        try:
+            oob_telemetry, telem_warnings = _extract_telemetry(
+                fitted_obj, X_oob, y_oob, telemetry_extractors,
+                n_samples=len(indices.oob), split_label="oob",
+            )
+            all_warnings.extend(telem_warnings)
+        except CriticalExtractorError as exc:
+            meta = _make_failed_metadata(
+                indices, y, model, seed,
+                status="failed",
+                error_msg=str(exc),
+                cv_duration_s=cv_duration_s,
+                fit_duration_s=fit_duration_s,
+            )
+            print(
+                f"Replicate {k}: critical telemetry extractor failed\n"
+                f"{traceback.format_exc()}",
+                file=sys.stderr, flush=True,
+            )
+            return ReplicateResult(
+                metadata=meta, output_rows=[], attributes=extracted_attributes, telemetry={},
+            )
+        inbag_telemetry: dict[str, Any] | None = None
+        if collect_inbag and inbag_probs is not None:
+            try:
+                y_unique_inbag = y[unique_inbag]
+                inbag_telemetry, telem_warnings_ib = _extract_telemetry(
+                    fitted_obj, X[unique_inbag], y_unique_inbag,
+                    telemetry_extractors,
+                    n_samples=len(unique_inbag), split_label="inbag",
+                )
+                all_warnings.extend(telem_warnings_ib)
+            except CriticalExtractorError as exc:
+                meta = _make_failed_metadata(
+                    indices, y, model, seed,
+                    status="failed",
+                    error_msg=str(exc),
+                    cv_duration_s=cv_duration_s,
+                    fit_duration_s=fit_duration_s,
+                )
+                print(
+                    f"Replicate {k}: critical telemetry extractor failed (inbag)\n"
+                    f"{traceback.format_exc()}",
+                    file=sys.stderr, flush=True,
+                )
+                return ReplicateResult(
+                    metadata=meta, output_rows=[], attributes=extracted_attributes, telemetry={},
+                )
+        # Concatenate OOB + inbag telemetry in row order
+        for name in oob_telemetry:
+            oob_val = oob_telemetry[name]
+            inbag_val = inbag_telemetry.get(name) if inbag_telemetry else None
+            if oob_val is None and inbag_val is None:
+                telemetry_results[name] = None
+            elif oob_val is None or inbag_val is None:
+                if inbag_val is None:
+                    telemetry_results[name] = oob_val
+                else:
+                    telemetry_results[name] = inbag_val
+            else:
+                if isinstance(oob_val, np.ndarray) and isinstance(inbag_val, np.ndarray):
+                    telemetry_results[name] = np.concatenate([oob_val, inbag_val], axis=0)
+                elif isinstance(oob_val, list) and isinstance(inbag_val, list):
+                    telemetry_results[name] = oob_val + inbag_val
+                else:
+                    telemetry_results[name] = oob_val 
+    else:
+        oob_telemetry = {}
+        inbag_telemetry = None
+    
+    # 6. Construct metadata and output rows for this replicate
     metadata = {
         "replicate_idx": k,
         "seed": seed,
@@ -224,15 +363,14 @@ def run_replicate(
         "n_pos_oob": int(np.sum(y_oob)),
         "cv_duration_s": cv_duration_s,
         "fit_duration_s": fit_duration_s,
-        "hparams": json.dumps(hparams_dict) if hparams_dict is not None else None,
         "status": "success",
-        "error_msg": None,
+        "error_msg": "; ".join(all_warnings) if all_warnings else None,
     }
-
-    prob_rows: list[dict[str, Any]] = []
+ 
+    output_rows: list[dict[str, Any]] = []
 
     for i in range(len(indices.oob)):
-        prob_rows.append({
+        output_rows.append({
             "replicate_idx": k,
             "sample_idx": int(indices.oob[i]),
             "bag": "oob",
@@ -240,11 +378,11 @@ def run_replicate(
             "prob_0": float(oob_probs[i, 0]),
             "prob_1": float(oob_probs[i, 1]),
         })
-
+ 
     if collect_inbag and inbag_probs is not None:
         y_unique_inbag = y[unique_inbag]
         for i in range(len(unique_inbag)):
-            prob_rows.append({
+            output_rows.append({
                 "replicate_idx": k,
                 "sample_idx": int(unique_inbag[i]),
                 "bag": "inbag",
@@ -253,4 +391,109 @@ def run_replicate(
                 "prob_1": float(inbag_probs[i, 1]),
             })
 
-    return ReplicateResult(metadata=metadata, probabilities=prob_rows)
+    return ReplicateResult(
+        metadata=metadata,
+        output_rows=output_rows,
+        attributes=extracted_attributes,
+        telemetry=telemetry_results,
+    )
+
+
+# Run all attribute extractors against a fitted model. Executes critical extractors first for fail-fast behavior.
+def _extract_attributes(
+    fitted_obj: Any,
+    extractors: dict[str, AttrSpec],
+) -> tuple[dict[str, Any], list[str]]:
+    attributes: dict[str, Any] = {}
+    warnings: list[str] = []
+ 
+    # Sort by loud fails first (critical=True)
+    sorted_names = sorted(extractors.keys(), key=lambda n: (not extractors[n].critical, n))
+ 
+    for name in sorted_names:
+        spec = extractors[name]
+        try:
+            value = spec.fn(fitted_obj)
+        except Exception as exc:
+            if spec.critical:
+                raise CriticalExtractorError(
+                    f"Critical attribute extractor '{name}' raised "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            warnings.append(
+                f"Attribute extractor '{name}' raised {type(exc).__name__}: {exc}"
+            )
+            attributes[name] = None
+            continue
+ 
+        if isinstance(value, dict):
+            flat = _flatten_dict(name, value)
+            attributes.update(flat)
+        else:
+            attributes[name] = value
+ 
+    return attributes, warnings
+
+
+# Run all telemetry extractors on a data split. Validates output shape and sample count.
+def _extract_telemetry(
+    fitted_obj: Any,
+    X_split: Any,
+    y_split: np.ndarray,
+    extractors: dict[str, TelemetrySpec],
+    n_samples: int,
+    split_label: str,
+) -> tuple[dict[str, Any], list[str]]:
+    results: dict[str, Any] = {}
+    warnings: list[str] = []
+ 
+    # Sort by loud fails first (critical=True)
+    sorted_names = sorted(extractors.keys(), key=lambda n: (not extractors[n].critical, n))
+ 
+    for name in sorted_names:
+        spec = extractors[name]
+        try:
+            value = spec.fn(fitted_obj, X_split, y_split)
+        except Exception as exc:
+            if spec.critical:
+                raise CriticalExtractorError(
+                    f"Critical telemetry extractor '{name}' raised "
+                    f"{type(exc).__name__}: {exc} (split={split_label})"
+                ) from exc
+            warnings.append(
+                f"Telemetry extractor '{name}' raised {type(exc).__name__}: "
+                f"{exc} (split={split_label})"
+            )
+            results[name] = None
+            continue
+ 
+        # Validate first axis matches sample count
+        if value is not None:
+            ret_type = _classify_return(value)
+ 
+            if ret_type == "ragged":
+                # Object array or list of arrays
+                if isinstance(value, np.ndarray) and not spec.ragged:
+                    raise CriticalExtractorError(
+                        f"Telemetry extractor '{name}' returned ragged output "
+                        f"(object array) but ragged=False. Set ragged=True in "
+                        f"TelemetrySpec to allow variable-length returns."
+                    )
+                length = len(value)
+            elif isinstance(value, np.ndarray):
+                length = value.shape[0]
+            else:
+                raise CriticalExtractorError(
+                    f"Telemetry extractor '{name}' must return an ndarray, "
+                    f"got {type(value).__name__}"
+                )
+ 
+            if length != n_samples:
+                raise CriticalExtractorError(
+                    f"Telemetry extractor '{name}' returned {length} rows, "
+                    f"expected {n_samples} (split={split_label})"
+                )
+ 
+        results[name] = value
+ 
+    return results, warnings
