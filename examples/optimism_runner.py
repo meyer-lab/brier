@@ -1,5 +1,3 @@
-"""Reference end-to-end runner for the Efron-Gong optimism correction path."""
-
 from __future__ import annotations
 
 import sys
@@ -20,11 +18,18 @@ import bootstraptools as bs
 RANDOM_SEED = 13
 DATASET = "synthetic"
 N_REPLICATES = 100
+MIN_SAMPLES_LEAF = 5
 
 
-def make_data(n: int, n_features: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """Build a synthetic binary-classification dataset."""
+def make_data(
+    n: int, n_features: int, seed: int, noise: float = 0.15
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build a synthetic binary-classification dataset with label noise."""
     X, y = make_classification(n_samples=n, n_features=n_features, random_state=seed)
+    rng = np.random.default_rng(seed)
+    flip = rng.random(n) < noise
+    y = y.copy()
+    y[flip] = 1 - y[flip]
     return X, y
 
 
@@ -38,9 +43,12 @@ def main(
     seeds = bs.derive_seeds(RANDOM_SEED, ["dataset", "model", "bootstrap"])
     X, y = make_data(n, n_features, seeds["dataset"])
 
-    # Apparent (in-sample) fit on ALL n rows — unrestricted tree, so it
-    # overfits and the optimism correction is visibly large.
-    apparent_model = DecisionTreeClassifier(random_state=seeds["model"]).fit(X, y)
+    # Apparent (in-sample) fit on all n rows. `min_samples_leaf` stops the
+    # tree from isolating every (noisy) point into its own pure leaf, so the
+    # apparent-on-resample score is < 1.0 and varies across replicates.
+    apparent_model = DecisionTreeClassifier(
+        min_samples_leaf=MIN_SAMPLES_LEAF, random_state=seeds["model"]
+    ).fit(X, y)
     apparent_p = apparent_model.predict_proba(X)[:, 1]
 
     run = bs.init(
@@ -63,7 +71,9 @@ def main(
         k = plan.replicate_idx
         Xf = bs.select(X, plan.fit_indices)
         yf = y[plan.fit_indices]
-        model = DecisionTreeClassifier(random_state=fit_seeds[k]).fit(Xf, yf)
+        model = DecisionTreeClassifier(
+            min_samples_leaf=MIN_SAMPLES_LEAF, random_state=fit_seeds[k]
+        ).fit(Xf, yf)
         p_all = model.predict_proba(X)[:, 1]  # predict on ALL n originals
 
         run.log_replicate(
@@ -76,12 +86,11 @@ def main(
 
     run.finish()
 
-    # DOWNSTREAM ANALYSIS
     def auc_metric(yt, pp, sample_weight=None):
         return roc_auc_score(yt, pp, sample_weight=sample_weight)
 
-    auc = bs.optimism_from_run(store, run.run_dir.name, auc_metric)
-    brier = bs.optimism_from_run(store, run.run_dir.name, brier_score_loss)
+    auc = bs.optimism_ci_from_run(store, run.run_dir.name, auc_metric)
+    brier = bs.optimism_ci_from_run(store, run.run_dir.name, brier_score_loss)
     err632 = bs.error_632_plus_from_run(store, run.run_dir.name, bs.zero_one_loss)
 
     return {
@@ -90,11 +99,13 @@ def main(
             "apparent": auc["apparent"],
             "optimism": auc["optimism"],
             "corrected": auc["corrected"],
+            "ci": auc["ci"],
         },
         "brier": {
             "apparent": brier["apparent"],
             "optimism": brier["optimism"],
             "corrected": brier["corrected"],
+            "ci": brier["ci"],
         },
         "error_632plus": err632,
     }

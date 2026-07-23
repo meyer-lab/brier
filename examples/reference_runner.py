@@ -1,5 +1,3 @@
-"""Reference end-to-end runner proving the write -> read -> UQ path."""
-
 from __future__ import annotations
 
 import pprint

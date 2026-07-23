@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.special import ndtri
 from sklearn.metrics import brier_score_loss, roc_auc_score
 from sklearn.neighbors import KNeighborsClassifier
 
 import bootstraptools as bs
+from bootstraptools import uq
 from bootstraptools.optimism import (
+    _per_replicate_perf,
     error_632,
     error_632_from_run,
     error_632_plus,
+    optimism_abcloc_ci,
+    optimism_abcloc_ci_from_run,
+    optimism_ci_from_run,
     optimism_correction,
     optimism_from_run,
+    optimism_location_shifted_ci,
     zero_one_loss,
 )
 
@@ -275,3 +282,218 @@ def test_632_from_run_matches_direct_call(tmp_path):
     assert via_run["estimate"] == pytest.approx(direct["estimate"], abs=1e-12)
     assert via_run["apparent"] == pytest.approx(direct["apparent"], abs=1e-12)
     assert via_run["oob"] == pytest.approx(direct["oob"], abs=1e-12)
+
+
+def test_location_shifted_ci_endpoints_match_percentile_shift_by_optimism():
+    """ci endpoints exactly equal uq.percentile(p_boot, alpha) shifted by -optimism."""
+    rng = np.random.default_rng(5)
+    X, y = _make_dataset(rng)
+
+    apparent_model = KNeighborsClassifier(n_neighbors=1)
+    apparent_model.fit(X, y)
+    apparent_p = apparent_model.predict_proba(X)[:, 1]
+
+    replicate_ps, counts = _overfit_replicates(rng, X, y, n_replicates=10)
+
+    metric = lambda yt, pp, sample_weight=None: roc_auc_score(
+        yt, pp, sample_weight=sample_weight
+    )
+
+    p_boot, p_orig = _per_replicate_perf(y, replicate_ps, counts, metric)
+    optimism = float(np.mean(p_boot - p_orig))
+
+    result = optimism_location_shifted_ci(
+        y, apparent_p, replicate_ps, counts, metric, alpha=0.1
+    )
+
+    q_lo, q_hi = uq.percentile(p_boot, 0.1)
+    assert result["ci"][0] == pytest.approx(q_lo - optimism, abs=1e-12)
+    assert result["ci"][1] == pytest.approx(q_hi - optimism, abs=1e-12)
+    assert result["apparent_ci"][0] == pytest.approx(q_lo, abs=1e-12)
+    assert result["apparent_ci"][1] == pytest.approx(q_hi, abs=1e-12)
+    assert result["alpha"] == 0.1
+
+
+@pytest.mark.parametrize(
+    "metric",
+    [roc_auc_score, brier_score_loss],
+    ids=["auc_higher_better", "brier_lower_better"],
+)
+def test_location_shifted_ci_self_signed_both_directions(metric):
+    """Works identically (self-signed) for higher-better (AUC) and
+    lower-better (Brier) metrics; matches optimism_correction's point
+    estimates; ci is well-ordered; apparent_ci brackets the shift."""
+    rng = np.random.default_rng(6)
+    X, y = _make_dataset(rng)
+
+    apparent_model = KNeighborsClassifier(n_neighbors=1)
+    apparent_model.fit(X, y)
+    apparent_p = apparent_model.predict_proba(X)[:, 1]
+
+    replicate_ps, counts = _overfit_replicates(rng, X, y, n_replicates=10)
+
+    correction = optimism_correction(y, apparent_p, replicate_ps, counts, metric)
+    result = optimism_location_shifted_ci(y, apparent_p, replicate_ps, counts, metric)
+
+    assert result["corrected"] == pytest.approx(correction["corrected"], abs=1e-12)
+    assert result["apparent"] == pytest.approx(correction["apparent"], abs=1e-12)
+    assert result["optimism"] == pytest.approx(correction["optimism"], abs=1e-12)
+
+    lo, hi = result["ci"]
+    assert lo <= hi
+
+    apparent_lo, apparent_hi = result["apparent_ci"]
+    assert apparent_lo <= apparent_hi
+    assert result["ci"] == pytest.approx(
+        (apparent_lo - result["optimism"], apparent_hi - result["optimism"]), abs=1e-12
+    )
+
+
+def test_location_shifted_ci_from_run_matches_direct_call(tmp_path):
+    store = tmp_path / "store"
+    rng = np.random.default_rng(7)
+    run_id, y, apparent_p, replicate_ps, counts = _write_optimism_run(store, rng)
+
+    direct = optimism_location_shifted_ci(
+        y, apparent_p, replicate_ps, counts, brier_score_loss
+    )
+    via_run = optimism_ci_from_run(store, run_id, brier_score_loss)
+
+    assert via_run["corrected"] == pytest.approx(direct["corrected"], abs=1e-12)
+    assert via_run["apparent"] == pytest.approx(direct["apparent"], abs=1e-12)
+    assert via_run["optimism"] == pytest.approx(direct["optimism"], abs=1e-12)
+    assert via_run["ci"] == pytest.approx(direct["ci"], abs=1e-12)
+    assert via_run["apparent_ci"] == pytest.approx(direct["apparent_ci"], abs=1e-12)
+    assert via_run["alpha"] == direct["alpha"]
+
+
+def _hand_dual_sd(x, nmin=10):
+    """Reference (hand-rolled, non-shared) implementation of Hmisc dualSD."""
+    x = np.asarray(x, dtype=float)
+    finite = x[np.isfinite(x)]
+    if len(finite) < nmin:
+        overall = float(np.std(finite, ddof=1))
+        return overall, overall
+    m = finite.mean()
+    bottom = finite[finite <= m]
+    top = finite[finite >= m]
+    if len(bottom) < 2 or len(top) < 2:
+        overall = float(np.std(finite, ddof=1))
+        return overall, overall
+    sd_bottom = float(np.sqrt(np.sum((bottom - m) ** 2) / (len(bottom) - 1)))
+    sd_top = float(np.sqrt(np.sum((top - m) ** 2) / (len(top) - 1)))
+    return sd_bottom, sd_top
+
+
+def test_abcloc_ci_numeric_exactness_hand_computed():
+    """ci endpoints and sd_bottom/sd_top exactly match a hand-rolled
+    reimplementation of the wtd4 quantity + dualSD + sd2rev formula."""
+    rng = np.random.default_rng(11)
+    X, y = _make_dataset(rng, n=60)
+
+    apparent_model = KNeighborsClassifier(n_neighbors=1)
+    apparent_model.fit(X, y)
+    apparent_p = apparent_model.predict_proba(X)[:, 1]
+
+    replicate_ps, counts = _overfit_replicates(rng, X, y, n_replicates=50)
+
+    result = optimism_abcloc_ci(
+        y, apparent_p, replicate_ps, counts, brier_score_loss, alpha=0.05
+    )
+
+    p_boot, p_orig = _per_replicate_perf(y, replicate_ps, counts, brier_score_loss)
+    x = p_boot - 1.25 * p_orig
+    sd_bottom, sd_top = _hand_dual_sd(x)
+
+    apparent = float(brier_score_loss(y, apparent_p))
+    optimism = float(np.mean(p_boot - p_orig))
+    corrected = apparent - optimism
+
+    z = float(ndtri(1 - 0.05 / 2))
+    expected_ci = (corrected - sd_top * z, corrected + sd_bottom * z)
+
+    assert result["sd_bottom"] == pytest.approx(sd_bottom, abs=1e-12)
+    assert result["sd_top"] == pytest.approx(sd_top, abs=1e-12)
+    assert result["ci"] == pytest.approx(expected_ci, abs=1e-12)
+    assert result["corrected"] == pytest.approx(corrected, abs=1e-12)
+
+
+def test_abcloc_ci_always_contains_corrected():
+    """ci_low <= corrected <= ci_high always holds (unlike methods 1/2)."""
+    rng = np.random.default_rng(12)
+    X, y = _make_dataset(rng, n=60)
+
+    apparent_model = KNeighborsClassifier(n_neighbors=1)
+    apparent_model.fit(X, y)
+    apparent_p = apparent_model.predict_proba(X)[:, 1]
+
+    replicate_ps, counts = _overfit_replicates(rng, X, y, n_replicates=60)
+
+    result = optimism_abcloc_ci(y, apparent_p, replicate_ps, counts, brier_score_loss)
+
+    lo, hi = result["ci"]
+    assert lo <= result["corrected"] <= hi
+
+
+def test_abcloc_ci_consistency_with_optimism_correction():
+    """corrected/apparent/optimism match optimism_correction on the same inputs."""
+    rng = np.random.default_rng(13)
+    X, y = _make_dataset(rng, n=60)
+
+    apparent_model = KNeighborsClassifier(n_neighbors=1)
+    apparent_model.fit(X, y)
+    apparent_p = apparent_model.predict_proba(X)[:, 1]
+
+    replicate_ps, counts = _overfit_replicates(rng, X, y, n_replicates=50)
+
+    correction = optimism_correction(y, apparent_p, replicate_ps, counts, brier_score_loss)
+    result = optimism_abcloc_ci(y, apparent_p, replicate_ps, counts, brier_score_loss)
+
+    assert result["corrected"] == pytest.approx(correction["corrected"], abs=1e-12)
+    assert result["apparent"] == pytest.approx(correction["apparent"], abs=1e-12)
+    assert result["optimism"] == pytest.approx(correction["optimism"], abs=1e-12)
+
+
+def test_abcloc_ci_from_run_matches_direct_call(tmp_path):
+    store = tmp_path / "store"
+    rng = np.random.default_rng(14)
+    run_id, y, apparent_p, replicate_ps, counts = _write_optimism_run(
+        store, rng, n=30, n_replicates=12
+    )
+
+    direct = optimism_abcloc_ci(y, apparent_p, replicate_ps, counts, brier_score_loss)
+    via_run = optimism_abcloc_ci_from_run(store, run_id, brier_score_loss)
+
+    assert via_run["corrected"] == pytest.approx(direct["corrected"], abs=1e-12)
+    assert via_run["apparent"] == pytest.approx(direct["apparent"], abs=1e-12)
+    assert via_run["optimism"] == pytest.approx(direct["optimism"], abs=1e-12)
+    assert via_run["ci"] == pytest.approx(direct["ci"], abs=1e-12)
+    assert via_run["sd_bottom"] == pytest.approx(direct["sd_bottom"], abs=1e-12)
+    assert via_run["sd_top"] == pytest.approx(direct["sd_top"], abs=1e-12)
+    assert via_run["alpha"] == direct["alpha"]
+
+
+def test_abcloc_ci_nmin_fallback_degenerate_small_b():
+    """With B < nmin (10), dualSD falls back to std(x, ddof=1) on both
+    sides and still returns a finite, ordered CI (no div-by-zero / NaN)."""
+    rng = np.random.default_rng(15)
+    X, y = _make_dataset(rng, n=40)
+
+    apparent_model = KNeighborsClassifier(n_neighbors=1)
+    apparent_model.fit(X, y)
+    apparent_p = apparent_model.predict_proba(X)[:, 1]
+
+    replicate_ps, counts = _overfit_replicates(rng, X, y, n_replicates=6)
+
+    result = optimism_abcloc_ci(y, apparent_p, replicate_ps, counts, brier_score_loss)
+
+    p_boot, p_orig = _per_replicate_perf(y, replicate_ps, counts, brier_score_loss)
+    x = p_boot - 1.25 * p_orig
+    expected_sd = float(np.std(x, ddof=1))
+
+    assert result["sd_bottom"] == pytest.approx(expected_sd, abs=1e-12)
+    assert result["sd_top"] == pytest.approx(expected_sd, abs=1e-12)
+
+    lo, hi = result["ci"]
+    assert np.isfinite(lo) and np.isfinite(hi)
+    assert lo <= result["corrected"] <= hi

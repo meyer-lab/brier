@@ -90,6 +90,78 @@ def optimism_bootstrap(
     return plans
 
 
+@dataclass(frozen=True)
+class DoubleResamplePlan:
+    """One outer replicate of Noma method 2 (double/two-stage bootstrap), 
+    paired with its nested inner resample plans."""
+
+    outer_idx: int
+    outer_plan: ResamplePlan
+    inner_plans: list[ResamplePlan]
+
+
+def double_optimism_bootstrap(
+    universe_size: int,
+    n_outer: int,
+    n_inner: int,
+    bootstrap_seed: int,
+    size: int | None = None,
+    replace: bool = True,
+) -> list[DoubleResamplePlan]:
+    """Noma method 2: nested (double) optimism bootstrap.
+
+    All seeds are derived deterministically from one `bootstrap_seed`: the
+    outer seeds via `_resample_seeds(bootstrap_seed, n_outer)`, and each
+    outer replicate's inner seeds via `_resample_seeds(outer_seed, n_inner)`,
+    so the entire R x B tree is reproducible from a single top-level seed.
+    """
+    source = np.arange(universe_size)
+    if size is None:
+        size = universe_size
+    outer_seeds = _resample_seeds(bootstrap_seed, n_outer)
+    double_plans = []
+    for r, outer_seed in enumerate(outer_seeds):
+        outer_rng = np.random.default_rng(outer_seed)
+        outer_fit = draw(outer_rng, source, size=size, replace=replace)
+        outer_eval = np.arange(universe_size)
+        outer_fit_counts = draw_counts(outer_fit, universe_size)
+        outer_plan = ResamplePlan(
+            replicate_idx=r,
+            fit_indices=outer_fit,
+            eval_indices=outer_eval,
+            fit_counts=outer_fit_counts,
+            resample_seed=outer_seed,
+            procedure="double_optimism_bootstrap",
+        )
+
+        inner_seeds = _resample_seeds(outer_seed, n_inner)
+        inner_plans = []
+        for b, inner_seed in enumerate(inner_seeds):
+            inner_rng = np.random.default_rng(inner_seed)
+            inner_fit = draw(inner_rng, source, size=size, replace=replace)
+            inner_eval = np.arange(universe_size)
+            inner_fit_counts = draw_counts(inner_fit, universe_size)
+            inner_plans.append(
+                ResamplePlan(
+                    replicate_idx=b,
+                    fit_indices=inner_fit,
+                    eval_indices=inner_eval,
+                    fit_counts=inner_fit_counts,
+                    resample_seed=inner_seed,
+                    procedure="double_optimism_bootstrap",
+                )
+            )
+
+        double_plans.append(
+            DoubleResamplePlan(
+                outer_idx=r,
+                outer_plan=outer_plan,
+                inner_plans=inner_plans,
+            )
+        )
+    return double_plans
+
+
 def train_resample_holdout(
     train_idx,
     val_idx,
