@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.13"
 
 [[package]]
-name = "brier"
+name = "bootstraptools"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
@@ -11,6 +11,7 @@ dependencies = [
     { name = "polars" },
     { name = "pytest" },
     { name = "scikit-learn" },
+    { name = "scipy" },
 ]
 
 [package.metadata]
@@ -19,6 +20,7 @@ requires-dist = [
     { name = "polars", specifier = ">=1.39.3" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
+    { name = "scipy", specifier = ">=1.17.1" },
 ]
 
 [[package]]
