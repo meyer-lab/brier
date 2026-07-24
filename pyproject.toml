@@ -1,7 +1,7 @@
 [project]
-name = "brier"
+name = "bootstraptools"
 version = "0.1.0"
-description = "Package for analyzing models using strictly proper scoring rules"
+description = "Package for analyzing models using bootstrap resampling methods"
 authors = [
     { name = "Ethan Hurt", email = "eshurt@g.ucla.edu" },
 ]
@@ -12,4 +12,5 @@ dependencies = [
     "polars>=1.39.3",
     "pytest>=9.0.2",
     "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
 ]
