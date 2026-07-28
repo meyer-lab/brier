@@ -134,13 +134,18 @@ def double_optimism_bootstrap(
             procedure="double_optimism_bootstrap",
         )
 
+        # Inner draws live in the outer resample's local position space, which has
+        # `size` rows. Drawing from `source` here would emit positions
+        # past the end of the outer resample, and a caller doing
+        # `select(X_out, ip.fit_indices)` would raise IndexError.
+        inner_source = np.arange(size)
         inner_seeds = _resample_seeds(outer_seed, n_inner)
         inner_plans = []
         for b, inner_seed in enumerate(inner_seeds):
             inner_rng = np.random.default_rng(inner_seed)
-            inner_fit = draw(inner_rng, source, size=size, replace=replace)
-            inner_eval = np.arange(universe_size)
-            inner_fit_counts = draw_counts(inner_fit, universe_size)
+            inner_fit = draw(inner_rng, inner_source, size=size, replace=replace)
+            inner_eval = np.arange(size)
+            inner_fit_counts = draw_counts(inner_fit, size)
             inner_plans.append(
                 ResamplePlan(
                     replicate_idx=b,

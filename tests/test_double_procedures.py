@@ -153,3 +153,52 @@ def test_double_optimism_bootstrap_size_override_respected():
         for ip in p.inner_plans:
             assert len(ip.fit_indices) == size
             assert ip.fit_counts.sum() == size
+
+
+def test_double_optimism_bootstrap_inner_indices_address_the_outer_resample():
+    """Inner plans must be usable as positions into the outer resample."""
+    universe_size = 20
+    size = universe_size // 2
+    plans = double_optimism_bootstrap(
+        universe_size=universe_size,
+        n_outer=2,
+        n_inner=2,
+        bootstrap_seed=0,
+        size=size,
+    )
+    X = np.arange(universe_size) * 10  # stand-in for a row-indexable dataset
+
+    for p in plans:
+        X_out = X[p.outer_plan.fit_indices]
+        assert len(X_out) == size
+        for ip in p.inner_plans:
+            # Must index the outer resample without raising.
+            assert ip.fit_indices.max() < size
+            assert ip.eval_indices.max() < size
+            X_inner = X_out[ip.fit_indices]
+            assert len(X_inner) == size
+            # fit_counts is the local multiplicity vector over the outer
+            # resample, so it must be one weight per outer-resample row.
+            assert len(ip.fit_counts) == size
+            assert np.array_equal(
+                ip.fit_counts, draw_counts(ip.fit_indices, size)
+            )
+
+
+def test_double_optimism_bootstrap_default_size_unchanged_by_local_source():
+    """The size==universe_size path (every current caller) must be untouched."""
+    plans = double_optimism_bootstrap(
+        universe_size=15, n_outer=3, n_inner=4, bootstrap_seed=7
+    )
+    for p in plans:
+        for ip in p.inner_plans:
+            assert len(ip.fit_counts) == 15
+            assert ip.fit_indices.max() < 15
+            # explicit-size call must agree with the default exactly
+    explicit = double_optimism_bootstrap(
+        universe_size=15, n_outer=3, n_inner=4, bootstrap_seed=7, size=15
+    )
+    for p, q in zip(plans, explicit):
+        assert np.array_equal(p.outer_plan.fit_indices, q.outer_plan.fit_indices)
+        for ip, iq in zip(p.inner_plans, q.inner_plans):
+            assert np.array_equal(ip.fit_indices, iq.fit_indices)
