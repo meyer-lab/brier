@@ -14,3 +14,20 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "scipy>=1.17.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=6.0,<7.0",
+    "ruff>=0.15",
+    "ty>=0.0.1a0",
+]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ty.environment]
+python-version = "3.13"

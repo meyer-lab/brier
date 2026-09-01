@@ -132,9 +132,7 @@ def query_apparent(store: str | Path, run_id: str) -> pl.DataFrame:
     """
     path = Path(store) / "runs" / run_id / "apparent.parquet"
     if not path.is_file():
-        raise FileNotFoundError(
-            f"No apparent table found for run {run_id!r}: {path}"
-        )
+        raise FileNotFoundError(f"No apparent table found for run {run_id!r}: {path}")
     return pl.read_parquet(path)
 
 
