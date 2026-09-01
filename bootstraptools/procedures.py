@@ -92,7 +92,7 @@ def optimism_bootstrap(
 
 @dataclass(frozen=True)
 class DoubleResamplePlan:
-    """One outer replicate of Noma method 2 (double/two-stage bootstrap), 
+    """One outer replicate of Noma method 2 (double/two-stage bootstrap),
     paired with its nested inner resample plans."""
 
     outer_idx: int

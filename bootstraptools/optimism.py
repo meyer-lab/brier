@@ -7,8 +7,9 @@ sample_weight=None) -> float` callable (sklearn's `brier_score_loss`,
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from scipy.special import ndtri
@@ -188,7 +189,9 @@ def _load_run_arrays(
     return y, apparent_p, replicate_ps, counts
 
 
-def optimism_from_run(store: str | Path, run_id: str, metric: MetricFn) -> dict[str, Any]:
+def optimism_from_run(
+    store: str | Path, run_id: str, metric: MetricFn
+) -> dict[str, Any]:
     """Load an `optimism_bootstrap` run's artifacts and apply `optimism_correction`.
 
     Requires a run produced by the `optimism_bootstrap` procedure with a
@@ -219,17 +222,17 @@ def optimism_location_shifted_ci(
     higher-better or lower-better, since both `corrected` and the percentile
     endpoints are computed in `metric`'s native direction.
 
-    This interval is `(q_lo, q_hi) - optimism`, NOT `corrected ± (something)`. 
-    Because the apparent statistic's bootstrap distribution (`p_boot`) carries 
-    its own bias relative to the full-data apparent value, the interval is not 
-    guaranteed to be centered on or contain the `corrected` point estimate. 
+    This interval is `(q_lo, q_hi) - optimism`, NOT `corrected ± (something)`.
+    Because the apparent statistic's bootstrap distribution (`p_boot`) carries
+    its own bias relative to the full-data apparent value, the interval is not
+    guaranteed to be centered on or contain the `corrected` point estimate.
 
     COVERAGE CAVEAT: this interval covers well in large samples but
     under-covers in small samples (empirically ~70-80% actual coverage at
     a nominal 95% level), because it ignores the sampling variability of
     the optimism term `O` itself. Only the spread of `theta_boot` is
     used, and `O` is treated as a fixed shift. The double bootstrap
-    (Noma et al. 2021 "method 2") corrects this but is much more expensive. 
+    (Noma et al. 2021 "method 2") corrects this but is much more expensive.
 
     Parameters
     ----------
@@ -506,7 +509,7 @@ def error_632(
     """The `.632` bootstrap estimate of out-of-sample per-sample loss.
 
     For per-sample-loss metrics (e.g., 0/1 error rate, squared error, log-loss
-    the discontinuous / improper-scoring-rule family), combining the apparent 
+    the discontinuous / improper-scoring-rule family), combining the apparent
     (in-sample) error with the leave-one-out bootstrap (out-of-bag) error:
 
         err_632 = 0.368 * err_app + 0.632 * eps0
@@ -615,7 +618,9 @@ def error_632_plus(
     }
 
 
-def error_632_from_run(store: str | Path, run_id: str, loss_fn: LossFn) -> dict[str, Any]:
+def error_632_from_run(
+    store: str | Path, run_id: str, loss_fn: LossFn
+) -> dict[str, Any]:
     """Load an `optimism_bootstrap` run's artifacts and apply `error_632`."""
     y, apparent_p, replicate_ps, counts = _load_run_arrays(store, run_id)
     return error_632(y, apparent_p, replicate_ps, counts, loss_fn)
@@ -629,9 +634,7 @@ def error_632_plus_from_run(
     return error_632_plus(y, apparent_p, replicate_ps, counts, loss_fn)
 
 
-def double_bootstrap_ci(
-    theta_corr: np.ndarray, alpha: float = 0.05
-) -> dict[str, Any]:
+def double_bootstrap_ci(theta_corr: np.ndarray, alpha: float = 0.05) -> dict[str, Any]:
     """CI on the Efron-Gong optimism-corrected estimate via Noma (2021) "method 2".
 
     `theta_corr` holds the R per-OUTER-replicate optimism-corrected estimates
