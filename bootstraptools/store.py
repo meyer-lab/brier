@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -99,7 +99,7 @@ def init(
         "config": config or {},
         "tags": tags or [],
         "store_model_state": store_model_state,
-        "created": datetime.now(timezone.utc).isoformat(),
+        "created": datetime.now(UTC).isoformat(),
         "status": "running",
         "n_replicates": 0,
         "summary": {},
@@ -243,7 +243,8 @@ class Run:
             arrays_dir = self.run_dir / "arrays"
             arrays_dir.mkdir(exist_ok=True)
             np.savez(
-                arrays_dir / f"replicate_{plan.replicate_idx:04d}.npz", **arrays
+                arrays_dir / f"replicate_{plan.replicate_idx:04d}.npz",
+                **arrays,  # ty: ignore[invalid-argument-type]
             )
 
         if model_state:
@@ -256,7 +257,7 @@ class Run:
             model_state_dir.mkdir(exist_ok=True)
             np.savez(
                 model_state_dir / f"replicate_{plan.replicate_idx:04d}.npz",
-                **model_state,
+                **model_state,  # ty: ignore[invalid-argument-type]
             )
 
     def log_apparent(
@@ -317,7 +318,10 @@ class Run:
         if arrays:
             apparent_dir = self.run_dir / "apparent"
             apparent_dir.mkdir(exist_ok=True)
-            np.savez(apparent_dir / "arrays.npz", **arrays)
+            np.savez(
+                apparent_dir / "arrays.npz",
+                **arrays,  # ty: ignore[invalid-argument-type]
+            )
 
         if model_state:
             if not self.store_model_state:
@@ -327,7 +331,10 @@ class Run:
                 )
             apparent_dir = self.run_dir / "apparent"
             apparent_dir.mkdir(exist_ok=True)
-            np.savez(apparent_dir / "model_state.npz", **model_state)
+            np.savez(
+                apparent_dir / "model_state.npz",
+                **model_state,  # ty: ignore[invalid-argument-type]
+            )
 
         self._apparent_logged = True
 

@@ -47,9 +47,7 @@ def _z0(theta_boot: np.ndarray, theta_hat: float) -> float:
     """Bias-correction z0 (SciPy convention, kept finite at the edges)."""
     theta_boot = np.asarray(theta_boot)
     B = len(theta_boot)
-    prop = (
-        np.sum(theta_boot < theta_hat) + np.sum(theta_boot <= theta_hat)
-    ) / (2 * B)
+    prop = (np.sum(theta_boot < theta_hat) + np.sum(theta_boot <= theta_hat)) / (2 * B)
     return float(ndtri(prop))
 
 
@@ -113,9 +111,7 @@ def bca(
     elif membership is not None:
         a = _acceleration_from_jack(_jab_theta_tilde(theta_boot, membership))
     else:
-        raise ValueError(
-            "BCa requires one of: acceleration, jackknife, or membership"
-        )
+        raise ValueError("BCa requires one of: acceleration, jackknife, or membership")
 
     zL = ndtri(alpha / 2)
     zU = ndtri(1 - alpha / 2)
@@ -193,23 +189,23 @@ def ci(
     `theta_boot`, so it is called directly instead.
     """
     if method == "percentile":
-        return percentile(theta_boot, **kwargs)  # type: ignore[arg-type]
+        return percentile(theta_boot, **kwargs)  # ty: ignore[invalid-argument-type]
     if method == "basic":
         if theta_hat is None:
             raise ValueError("basic requires theta_hat")
-        return basic(theta_boot, theta_hat, **kwargs)  # type: ignore[arg-type]
+        return basic(theta_boot, theta_hat, **kwargs)  # ty: ignore[invalid-argument-type]
     if method == "normal":
         if theta_hat is None:
             raise ValueError("normal requires theta_hat")
-        return normal(theta_boot, theta_hat, **kwargs)  # type: ignore[arg-type]
+        return normal(theta_boot, theta_hat, **kwargs)  # ty: ignore[invalid-argument-type]
     if method == "bca":
         if theta_hat is None:
             raise ValueError("bca requires theta_hat")
-        return bca(theta_boot, theta_hat, **kwargs)  # type: ignore[arg-type]
+        return bca(theta_boot, theta_hat, **kwargs)  # ty: ignore[invalid-argument-type]
     if method == "studentized":
         if theta_hat is None:
             raise ValueError("studentized requires theta_hat")
         if "se_boot" not in kwargs or "se_hat" not in kwargs:
             raise ValueError("studentized requires se_boot and se_hat")
-        return studentized(theta_boot, theta_hat, **kwargs)  # type: ignore[arg-type]
+        return studentized(theta_boot, theta_hat, **kwargs)  # ty: ignore[invalid-argument-type]
     raise ValueError(f"Unknown method {method!r}")
