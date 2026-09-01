@@ -1,0 +1,3 @@
+# `bootstraptools.optimism`
+
+::: bootstraptools.optimism

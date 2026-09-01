@@ -1,0 +1,3 @@
+# `bootstraptools.resample`
+
+::: bootstraptools.resample
