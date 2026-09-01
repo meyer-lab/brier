@@ -16,6 +16,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.7.7",
+    "mkdocstrings[python]>=1.0.6",
+]
 dev = [
     "pytest-cov>=6.0,<7.0",
     "ruff>=0.15",
@@ -28,6 +33,5 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
-
 [tool.ty.environment]
 python-version = "3.13"
